@@ -127,6 +127,10 @@ network::ResourceResponseHead ToResponseHead(const mate::Dictionary& dict) {
         head.headers->GetMimeTypeAndCharset(&head.mime_type, &head.charset);
         has_content_type = true;
       }
+
+      if (base::ToLowerASCII(iter.first) == "content-length") {
+        head.content_length = std::stol(iter.second.GetString());
+      }
     }
   }
 
@@ -186,6 +190,24 @@ void AtomURLLoaderFactory::Clone(
   bindings_.AddBinding(this, std::move(request));
 }
 
+std::string ComputeMethodForRedirect(const std::string& method,
+                                     int http_status_code) {
+  // For 303 redirects, all request methods except HEAD are converted to GET,
+  // as per the latest httpbis draft.  The draft also allows POST requests to
+  // be converted to GETs when following 301/302 redirects, for historical
+  // reasons. Most major browsers do this and so shall we.  Both RFC 2616 and
+  // the httpbis draft say to prompt the user to confirm the generation of new
+  // requests, other than GET and HEAD requests, but IE omits these prompts and
+  // so shall we.
+  // See: https://tools.ietf.org/html/rfc7231#section-6.4
+  if ((http_status_code == 303 && method != "HEAD") ||
+      ((http_status_code == 301 || http_status_code == 302) &&
+       method == "POST")) {
+    return "GET";
+  }
+  return method;
+}
+
 // static
 void AtomURLLoaderFactory::StartLoading(
     network::mojom::URLLoaderRequest loader,
@@ -208,7 +230,6 @@ void AtomURLLoaderFactory::StartLoading(
         network::URLLoaderCompletionStatus(net::ERR_NOT_IMPLEMENTED));
     return;
   }
-
   // Parse {error} object.
   mate::Dictionary dict = ToDict(args->isolate(), response);
   if (!dict.IsEmpty()) {
@@ -218,9 +239,7 @@ void AtomURLLoaderFactory::StartLoading(
       return;
     }
   }
-
   network::ResourceResponseHead head = ToResponseHead(dict);
-
   // Handle redirection.
   //
   // Note that with NetworkService, sending the "Location" header no longer
@@ -229,20 +248,19 @@ void AtomURLLoaderFactory::StartLoading(
   // API in WebRequestProxyingURLLoaderFactory.
   std::string location;
   if (head.headers->IsRedirect(&location)) {
+    auto new_method =
+        ComputeMethodForRedirect(request.method, head.headers->response_code());
+    auto new_location = request.url.Resolve(location);
     network::ResourceRequest new_request = request;
-    GURL new_location = GURL(location);
-
     new_request.url = new_location;
     new_request.site_for_cookies = new_location;
-
+    new_request.method = new_method;
     net::RedirectInfo redirect_info;
     redirect_info.status_code = head.headers->response_code();
-    redirect_info.new_method = request.method;
+    redirect_info.new_method = new_method;
     redirect_info.new_url = new_location;
     redirect_info.new_site_for_cookies = new_location;
-
     client->OnReceiveRedirect(redirect_info, head);
-
     // When the redirection comes from an intercepted scheme (which has
     // |proxy_factory| passed), we askes the proxy factory to create a loader
     // for new URL, otherwise we call |StartLoadingHttp|, which creates
@@ -252,7 +270,7 @@ void AtomURLLoaderFactory::StartLoading(
     // with default factory (i.e. calling StartLoadingHttp) would bypass the
     // ProxyingURLLoaderFactory, we have to explicitly use the proxy factory to
     // create loader so it is possible to have handlers of intercepted scheme
-    // getting called recursively, which is a behavior expected in protocol
+    // getting called recursively, which is a behavior expected in protocolb
     // module.
     //
     // I'm not sure whether this is an intended behavior in Chromium.
@@ -267,14 +285,12 @@ void AtomURLLoaderFactory::StartLoading(
     }
     return;
   }
-
   // Some protocol accepts non-object responses.
   if (dict.IsEmpty() && ResponseMustBeObject(type)) {
     client->OnComplete(
         network::URLLoaderCompletionStatus(net::ERR_NOT_IMPLEMENTED));
     return;
   }
-
   switch (type) {
     case ProtocolType::kBuffer:
       StartLoadingBuffer(std::move(client), std::move(head), dict);

@@ -214,6 +214,7 @@ class ProxyingURLLoaderFactory
   mojo::BindingSet<network::mojom::URLLoaderFactory> proxy_bindings_;
   network::mojom::URLLoaderFactoryPtr target_factory_;
   uint64_t* request_id_generator_;  // managed by AtomBrowserClient
+  std::set<int32_t> intercepted_requests_;
   mojo::Receiver<network::mojom::TrustedURLLoaderHeaderClient>
       url_loader_header_client_receiver_{this};
   const content::ContentBrowserClient::URLLoaderFactoryType
